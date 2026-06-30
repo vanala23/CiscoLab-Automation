@@ -123,13 +123,15 @@ def set_dhcp_subnet(vlan_id: int, service: str, subnet_name: str, session_token:
                 "dnsServers": [f"192.168.{vlan_id}.1"],
                 "ntpServers": [],
                 "subnet": f"192.168.{vlan_id}.0/24",
-                "interface": "eth1",
+                "interface": "p1",
+                "domain": "domain.barracuda.com",
                 "vendorId": "",
                 "vendorIdConversion": "hex"
             }
         },
         verify=False, timeout=5
     )
+ 
     r.raise_for_status()
     print_ok("DHCP range set")
 
@@ -138,7 +140,6 @@ def configure_cgf(vlan_id: int, service: str = "DHCP", subnet_name: str = "LAN")
     """Run full CGF configuration: management IP + network activation + DHCP."""
     new_ip = VLAN_IP_MAP[vlan_id]
 
-    # Step 1: Set management IP on original IP
     token = begin_session()
     try:
         set_management_ip(vlan_id, token)
@@ -155,11 +156,9 @@ def configure_cgf(vlan_id: int, service: str = "DHCP", subnet_name: str = "LAN")
             pass
         raise
 
-    # Step 2: Wait for CGF on new IP
     time.sleep(5)
     wait_for_ip_change(new_ip)
 
-    # Step 3: Configure DHCP on new IP
     token = begin_session(ip=new_ip)
     try:
         set_dhcp_subnet(vlan_id, service, subnet_name, token, ip=new_ip)
