@@ -1,176 +1,299 @@
 import requests
 import urllib3
 import time
+
 from config import CGF_MGMT_IP, CGF_TOKEN, VLAN_IP_MAP
 from utils import print_ok, print_info, print_err
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+urllib3.disable_warnings()
 
-HEADERS = {"X-API-Token": CGF_TOKEN, "Content-Type": "application/json"}
+HEADERS = {
+    "X-API-Token": CGF_TOKEN,
+    "Content-Type": "application/json"
+}
 
+# =========================================================
+# STATE (CRITICAL for IP switch)
+# =========================================================
 
-def _base(ip: str = None) -> str:
-    return f"https://{ip or CGF_MGMT_IP}:8443/rest/config/v1"
-
-def _control(ip: str = None) -> str:
-    return f"https://{ip or CGF_MGMT_IP}:8443/rest/control/v1"
-
-
-def wait_for_cgf(ip: str = None, timeout: int = 600) -> None:
-    """Wait for the CGF REST API to become available."""
-    print_info("Waiting for CGF API...")
-    start = time.time()
-    for attempt in range(timeout):
-        try:
-            r = requests.get(
-                f"{_base(ip)}/box/network/management",
-                headers=HEADERS, verify=False, timeout=3
-            )
-            if r.status_code in [200, 401]:
-                print_ok(f"CGF API reachable ({time.time()-start:.0f}s), waiting 90s for full boot...")
-                time.sleep(90)
-                print_ok("Ready")
-                return
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-            pass
-        if attempt % 30 == 0 and attempt > 0:
-            print_info(f"Still waiting... ({time.time()-start:.0f}s)")
-        time.sleep(1)
-    raise TimeoutError("CGF API unreachable")
+CURRENT_IP = None
 
 
-def wait_for_ip_change(new_ip: str, timeout: int = 120) -> None:
-    """Wait for CGF to become reachable at its new IP address."""
-    print_info(f"Waiting for CGF at {new_ip}...")
-    for _ in range(timeout):
-        try:
-            r = requests.get(
-                f"{_base(new_ip)}/box/network/management",
-                headers=HEADERS, verify=False, timeout=3
-            )
-            if r.status_code in [200, 401]:
-                print_ok(f"CGF reachable at {new_ip}")
-                return
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-            pass
-        time.sleep(1)
-    raise TimeoutError(f"CGF not reachable at {new_ip}")
+def active_ip(ip=None):
+    """Always resolve correct active CGF IP"""
+    return ip or CURRENT_IP or CGF_MGMT_IP
 
 
-def begin_session(ip: str = None) -> str:
-    """Start a new configuration session and return the session token."""
-    r = requests.post(f"{_base(ip)}/begin", headers=HEADERS, verify=False, timeout=5)
+def base(ip=None):
+    return f"https://{active_ip(ip)}:8443/rest/config/v1"
+
+
+def ctrl(ip=None):
+    return f"https://{active_ip(ip)}:8443/rest/control/v1"
+
+
+# =========================================================
+# SESSION
+# =========================================================
+
+def begin(ip=None):
+    r = requests.post(
+        f"{base(ip)}/begin",
+        headers=HEADERS,
+        verify=False,
+        timeout=10
+    )
     r.raise_for_status()
-    return r.json().get("token")
+    return r.json()["token"]
 
 
-def commit_session(session_token: str, ip: str = None) -> None:
-    """Commit configuration changes."""
-    try:
-        r = requests.post(
-            f"{_base(ip)}/commit", headers=HEADERS,
-            params={"token": session_token}, verify=False, timeout=5
-        )
-        r.raise_for_status()
-    except requests.exceptions.ConnectionError:
-        pass
+def commit(token, ip=None):
+    requests.post(
+        f"{base(ip)}/commit",
+        headers=HEADERS,
+        params={"token": token},
+        verify=False,
+        timeout=10
+    )
 
 
-def activate_network(ip: str = None) -> None:
-    """Trigger a soft network activation."""
+def rollback(token, ip=None):
     try:
         requests.post(
-            f"{_control(ip)}/box/net/activate/soft",
-            headers=HEADERS, verify=False, timeout=5
+            f"{base(ip)}/rollback",
+            headers=HEADERS,
+            params={"token": token},
+            verify=False,
+            timeout=10
         )
-    except requests.exceptions.ConnectionError:
+    except:
         pass
-    print_ok("Network activation triggered")
 
 
-def set_management_ip(vlan_id: int, session_token: str, ip: str = None) -> None:
-    """Set the management IP address for the given VLAN."""
+# =========================================================
+# WAIT HELPERS
+# =========================================================
+
+def wait_for_cgf(ip=None):
+    print_info("Waiting for CGF API...")
+
+    for _ in range(600):
+        try:
+            r = requests.get(
+                f"{base(ip)}/box/network/management",
+                headers=HEADERS,
+                verify=False,
+                timeout=3
+            )
+            if r.status_code in (200, 401):
+                print_ok("CGF reachable")
+                time.sleep(60)
+                return
+        except:
+            pass
+        time.sleep(1)
+
+    raise TimeoutError("CGF unreachable")
+
+
+def wait_for_ip(ip):
+    global CURRENT_IP
+
+    print_info(f"Waiting for CGF at {ip}...")
+
+    for _ in range(120):
+        try:
+            r = requests.get(
+                f"https://{ip}:8443/rest/config/v1/box/network/management",
+                headers=HEADERS,
+                verify=False,
+                timeout=3
+            )
+            if r.status_code in (200, 401):
+                CURRENT_IP = ip
+                print_ok(f"CGF reachable at {ip}")
+                return
+        except:
+            pass
+        time.sleep(1)
+
+    raise TimeoutError(f"CGF not reachable at {ip}")
+
+
+# =========================================================
+# MANAGEMENT IP (STEP 1)
+# =========================================================
+
+def set_management(vlan_id, token, ip=None):
+    global CURRENT_IP
+
     new_ip = VLAN_IP_MAP[vlan_id]
-    print_info(f"Setting management IP to {new_ip}")
+    print_info(f"Setting management IP -> {new_ip}")
+
     r = requests.patch(
-        f"{_base(ip)}/box/network/management",
+        f"{base(ip)}/box/network/management",
         headers=HEADERS,
-        params={"token": session_token},
+        params={"token": token},
         json={
-            "address": {"ip": new_ip, "mask": 22},
-            "sharedIps": {
-                "remove": [CGF_MGMT_IP],
-                "add": [{"ip": new_ip, "alias": "none", "pingable": True}]
+            "address": {
+                "ip": new_ip,
+                "mask": 22
             }
         },
-        verify=False, timeout=5
+        verify=False,
+        timeout=10
     )
+
+    if r.status_code >= 400:
+        print_err(r.text)
+
     r.raise_for_status()
-    print_ok("Management IP set")
+
+    CURRENT_IP = new_ip
+    print_ok("Management IP updated")
 
 
-def set_dhcp_subnet(vlan_id: int, service: str, subnet_name: str, session_token: str, ip: str = None) -> None:
-    """Configure the DHCP subnet range for the given VLAN."""
-    print_info(f"Setting DHCP range for VLAN {vlan_id}")
+# =========================================================
+# ADDITIONAL ADDRESS (LAN on p2)
+# =========================================================
+
+def set_lan_additional_ip(vlan_id, token, ip=None):
+    lan_ip = f"192.168.{vlan_id}.1"
+    name = "LAN"   # bleibt konstant, aber wir UPSERTEN
+
+    print_info(f"Setting LAN IP -> {lan_ip}")
+
+    url = f"{base(ip)}/box/network/additional-address/v4/{name}"
+
     r = requests.put(
-        f"{_base(ip)}/service-container/{service}/dhcp/subnets/{subnet_name}",
+        url,
         headers=HEADERS,
-        params={"token": session_token},
+        params={"token": token},
+        json={
+            "name": name,
+            "properties": {
+                "ipAddress": lan_ip,
+                "mask": "255.255.255.0",
+                "interface": "p2",
+                "respondsToPing": True,
+                "isManagementIp": False,
+                "sharedIps": [
+                    {
+                        "ipAddress": lan_ip,
+                        "alias": "none",
+                        "respondsToPing": True
+                    }
+                ],
+                "directInternetAccess": False,
+                "providerClass": "bulk",
+                "routeMetric": 1
+            }
+        },
+        verify=False,
+        timeout=10
+    )
+
+    r.raise_for_status()
+    print_ok("LAN updated (UPSERT)")
+
+
+# =========================================================
+# DHCP
+# =========================================================
+
+def set_dhcp(vlan_id, service, subnet_name, token, ip=None):
+    network = f"192.168.{vlan_id}.0/24"
+
+    print_info(f"Configuring DHCP subnet {subnet_name} -> {network}")
+
+    r = requests.put(
+        f"{base(ip)}/service-container/{service}/dhcp/subnets/{subnet_name}",
+        headers=HEADERS,
+        params={"token": token},
         json={
             "properties": {
-                "ranges": [{"startIp": f"192.168.{vlan_id}.10", "endIp": f"192.168.{vlan_id}.100"}],
+                "subnet": network,
+                "interface": "p2",
+                "ranges": [
+                    {
+                        "startIp": f"192.168.{vlan_id}.10",
+                        "endIp": f"192.168.{vlan_id}.100"
+                    }
+                ],
                 "routers": [f"192.168.{vlan_id}.1"],
-                "dnsServers": [f"192.168.{vlan_id}.1"],
-                "ntpServers": [],
-                "subnet": f"192.168.{vlan_id}.0/24",
-                "interface": "p1",
-                "domain": "domain.barracuda.com",
-                "vendorId": "",
-                "vendorIdConversion": "hex"
+                "dnsServers": [f"192.168.{vlan_id}.1"]
             }
         },
-        verify=False, timeout=5
+        verify=False,
+        timeout=10
     )
- 
+
+    if r.status_code >= 400:
+        print_err(r.text)
+
     r.raise_for_status()
-    print_ok("DHCP range set")
+    print_ok("DHCP configured")
 
 
-def configure_cgf(vlan_id: int, service: str = "DHCP", subnet_name: str = "LAN") -> None:
-    """Run full CGF configuration: management IP + network activation + DHCP."""
-    new_ip = VLAN_IP_MAP[vlan_id]
+# =========================================================
+# NETWORK ACTIVATION
+# =========================================================
 
-    token = begin_session()
+def activate(ip=None):
+    print_info("Trigger network activation")
+
     try:
-        set_management_ip(vlan_id, token)
-        commit_session(token)
-        activate_network()
+        requests.post(
+            f"{ctrl(ip)}/box/net/activate/soft",
+            headers=HEADERS,
+            verify=False,
+            timeout=10
+        )
+    except:
+        pass
+
+    print_ok("Activation triggered")
+
+
+# =========================================================
+# MAIN FLOW
+# =========================================================
+
+def configure_cgf(vlan_id, service="DHCP", subnet_name="LAN"):
+    mgmt_ip = VLAN_IP_MAP[vlan_id]
+
+    # -------------------------
+    # STEP 1: MANAGEMENT
+    # -------------------------
+    token = begin()
+    try:
+        set_management(vlan_id, token)
+        commit(token)
+        activate()
     except Exception as e:
-        print_err(f"Failed to set management IP: {e} — rolling back")
-        try:
-            requests.post(
-                f"{_base()}/rollback", headers=HEADERS,
-                params={"token": token}, verify=False, timeout=5
-            )
-        except requests.exceptions.ConnectionError:
-            pass
+        print_err(f"Management failed: {e}")
+        rollback(token)
         raise
 
-    time.sleep(5)
-    wait_for_ip_change(new_ip)
+    time.sleep(10)
 
-    token = begin_session(ip=new_ip)
+    wait_for_ip(mgmt_ip)
+
+    # -------------------------
+    # STEP 2: LAN + DHCP
+    # -------------------------
+    token = begin()
+
     try:
-        set_dhcp_subnet(vlan_id, service, subnet_name, token, ip=new_ip)
-        commit_session(token, ip=new_ip)
-        print_ok(f"CGF configured -> {new_ip}")
+        set_lan_additional_ip(vlan_id, token)
+        set_dhcp(vlan_id, service, subnet_name, token)
+
+        commit(token)
+        activate(mgmt_ip)
+
+        print_ok(f"CGF configured -> {mgmt_ip}")
+
     except Exception as e:
-        print_err(f"Failed to set DHCP: {e} — rolling back")
-        try:
-            requests.post(
-                f"{_base(new_ip)}/rollback", headers=HEADERS,
-                params={"token": token}, verify=False, timeout=5
-            )
-        except requests.exceptions.ConnectionError:
-            pass
+        print_err(f"Config failed: {e}")
+        rollback(token, mgmt_ip)
         raise

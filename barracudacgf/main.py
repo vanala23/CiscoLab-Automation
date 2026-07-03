@@ -27,8 +27,7 @@ def deploy(vlan_id: int) -> None:
             print_ok(f"CGF{vlan_id} deployed successfully -> {VLAN_IP_MAP[vlan_id]}")
             return
         except Exception as e:
-            print_err(f"Attempt {a
-            ttempt}/{MAX_RETRIES} failed: {e}")
+            print_err(f"Attempt {attempt}/{MAX_RETRIES} failed: {e}")
             try:
                 if vm_exists(vlan_id):
                     delete_vm(vlan_id)
