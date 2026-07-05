@@ -3,7 +3,7 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from proxmox import clone_vm, set_vlan_tag, start_vm, wait_for_vm, vm_exists, delete_vm
-from cgf import wait_for_cgf, configure_cgf
+from cgf import wait_for_api, configure_cgf
 from config import VLANS, CGF_DHCP_SERVICE, CGF_DHCP_SUBNET, VLAN_IP_MAP
 from utils import print_ok, print_info, print_err, print_skip, print_header
 
@@ -22,7 +22,7 @@ def deploy(vlan_id: int) -> None:
             set_vlan_tag(vlan_id)
             start_vm(vlan_id)
             wait_for_vm(vlan_id)
-            wait_for_cgf()
+            wait_for_api()
             configure_cgf(vlan_id, service=CGF_DHCP_SERVICE, subnet_name=CGF_DHCP_SUBNET)
             print_ok(f"CGF{vlan_id} deployed successfully -> {VLAN_IP_MAP[vlan_id]}")
             return
